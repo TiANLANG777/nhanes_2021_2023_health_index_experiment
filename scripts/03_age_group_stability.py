@@ -17,6 +17,22 @@ from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+try:
+    from xgboost import XGBRegressor
+except Exception as exc:  # pragma: no cover - runtime environment dependent
+    XGBRegressor = None
+    XGBOOST_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+else:
+    XGBOOST_IMPORT_ERROR = ""
+
+try:
+    from lightgbm import LGBMRegressor
+except Exception as exc:  # pragma: no cover - runtime environment dependent
+    LGBMRegressor = None
+    LIGHTGBM_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+else:
+    LIGHTGBM_IMPORT_ERROR = ""
+
 
 DEFAULT_DATA_DIR = Path("/content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/data")
 DEFAULT_OUTPUT_DIR = Path("/content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/outputs")
@@ -38,6 +54,7 @@ STRICT_BANNED_COLUMNS = {
 }
 STRICT_BANNED_PREFIXES = ("r_",)
 RANDOM_STATE = 42
+MODEL_CHOICES = ["ridge", "elastic_net", "random_forest", "gradient_boosting", "xgboost", "lightgbm"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-set", choices=sorted(FEATURE_FILES), default="full", help="Feature set to evaluate.")
     parser.add_argument(
         "--model",
-        choices=["ridge", "elastic_net", "random_forest", "gradient_boosting"],
+        choices=MODEL_CHOICES,
         default="random_forest",
         help="Model family for subgroup evaluation.",
     )
@@ -72,7 +89,7 @@ def compute_rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
 
 def build_model_registry() -> dict[str, Pipeline]:
     """Create reusable model pipelines. / 创建可复用模型流水线。"""
-    return {
+    registry: dict[str, Pipeline] = {
         "ridge": Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
@@ -109,9 +126,50 @@ def build_model_registry() -> dict[str, Pipeline]:
         ),
     }
 
+    if XGBRegressor is not None:
+        registry["xgboost"] = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                (
+                    "model",
+                    XGBRegressor(
+                        objective="reg:squarederror",
+                        n_estimators=400,
+                        learning_rate=0.05,
+                        max_depth=4,
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        n_jobs=-1,
+                        random_state=RANDOM_STATE,
+                        verbosity=0,
+                    ),
+                ),
+            ]
+        )
+    if LGBMRegressor is not None:
+        registry["lightgbm"] = Pipeline(
+            steps=[
+                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                (
+                    "model",
+                    LGBMRegressor(
+                        n_estimators=400,
+                        learning_rate=0.05,
+                        num_leaves=31,
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        n_jobs=-1,
+                        random_state=RANDOM_STATE,
+                        verbosity=-1,
+                    ),
+                ),
+            ]
+        )
+    return registry
+
 
 def derive_age_group(age_series: pd.Series) -> pd.Series:
-    """Derive age groups if they are missing. / 在缺少年齢组时重新派生年龄组。"""
+    """Derive age groups if they are missing. / 在缺少年龄组时重新派生年龄组。"""
     age = pd.to_numeric(age_series, errors="coerce")
     groups = pd.Series("missing", index=age.index, dtype="object")
     groups[(age >= 18) & (age < 35)] = "18-35"
@@ -149,6 +207,20 @@ def main() -> int:
     if len(features) != len(targets):
         raise ValueError("Feature rows and target rows do not match. Please regenerate aligned CSV files.")
 
+    registry = build_model_registry()
+    if args.model not in registry:
+        if args.model == "xgboost":
+            raise ImportError(
+                "中文：XGBoost 不可用。 English: XGBoost is unavailable. "
+                f"Original error: {XGBOOST_IMPORT_ERROR}"
+            )
+        if args.model == "lightgbm":
+            raise ImportError(
+                "中文：LightGBM 不可用。 English: LightGBM is unavailable. "
+                f"Original error: {LIGHTGBM_IMPORT_ERROR}"
+            )
+        raise KeyError(f"Unsupported model: {args.model}")
+
     y = pd.to_numeric(targets["H_v2"], errors="coerce")
     keep_mask = y.notna()
     X = features.loc[keep_mask].reset_index(drop=True)
@@ -160,7 +232,7 @@ def main() -> int:
     else:
         metadata["age_group"] = metadata["age_group"].fillna("missing")
 
-    model = build_model_registry()[args.model]
+    model = registry[args.model]
     cv = KFold(n_splits=args.n_splits, shuffle=True, random_state=RANDOM_STATE)
 
     # Use out-of-fold predictions to avoid optimistic subgroup metrics. / 使用折外预测避免过于乐观的分组指标。
