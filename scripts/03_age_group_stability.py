@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
@@ -61,6 +62,14 @@ def detect_banned_columns(columns: list[str]) -> list[str]:
     return sorted(set(banned))
 
 
+def compute_rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
+    """中文：计算 RMSE，避免依赖 sklearn 的 squared=False 参数。
+    English: Compute RMSE without relying on sklearn's squared=False argument.
+    """
+    mse = mean_squared_error(y_true, y_pred)
+    return float(np.sqrt(mse))
+
+
 def build_model_registry() -> dict[str, Pipeline]:
     """Create reusable model pipelines. / 创建可复用模型流水线。"""
     return {
@@ -102,7 +111,7 @@ def build_model_registry() -> dict[str, Pipeline]:
 
 
 def derive_age_group(age_series: pd.Series) -> pd.Series:
-    """Derive age groups if they are missing. / 在缺少年龄组时重新派生年龄组。"""
+    """Derive age groups if they are missing. / 在缺少年齢组时重新派生年龄组。"""
     age = pd.to_numeric(age_series, errors="coerce")
     groups = pd.Series("missing", index=age.index, dtype="object")
     groups[(age >= 18) & (age < 35)] = "18-35"
@@ -119,7 +128,7 @@ def compute_group_metrics(frame: pd.DataFrame) -> dict[str, float | int | str]:
     return {
         "age_group": str(frame["age_group"].iloc[0]),
         "n": int(len(frame)),
-        "rmse": float(mean_squared_error(y_true, y_pred, squared=False)),
+        "rmse": compute_rmse(y_true, y_pred),
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "r2": float(r2_score(y_true, y_pred)) if len(frame) > 1 else float("nan"),
         "mean_error": float((y_pred - y_true).mean()),
@@ -165,7 +174,7 @@ def main() -> int:
         {
             "age_group": "overall",
             "n": int(len(prediction_frame)),
-            "rmse": float(mean_squared_error(prediction_frame["H_v2_true"], prediction_frame["H_v2_pred"], squared=False)),
+            "rmse": compute_rmse(prediction_frame["H_v2_true"], prediction_frame["H_v2_pred"]),
             "mae": float(mean_absolute_error(prediction_frame["H_v2_true"], prediction_frame["H_v2_pred"])),
             "r2": float(r2_score(prediction_frame["H_v2_true"], prediction_frame["H_v2_pred"])),
             "mean_error": float((prediction_frame["H_v2_pred"] - prediction_frame["H_v2_true"]).mean()),
