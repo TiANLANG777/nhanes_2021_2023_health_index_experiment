@@ -51,6 +51,18 @@ The following variables are strictly forbidden from entering model inputs.
 脚本会在训练前再次检测并删除这些列，避免误用。  
 The scripts check and drop these columns again before training to prevent accidental leakage.
 
+## sklearn 兼容性 / sklearn Compatibility
+
+为了兼容不同版本的 Colab 运行环境，RMSE 计算不依赖 `mean_squared_error(..., squared=False)`。  
+To stay compatible with different Colab runtime versions, RMSE computation does not rely on `mean_squared_error(..., squared=False)`.
+
+当前实际运行时的 `scikit-learn` 版本会写入：  
+The actual `scikit-learn` version used at runtime is recorded in:
+
+- `outputs/hv2_training/full/training_metadata.json`
+- `outputs/hv2_training/reduced/training_metadata.json`
+- `outputs/experiment_summary/experiment_summary.md`
+
 ## 建议的 Colab 使用方式 / Suggested Colab Workflow
 
 1. Mount Google Drive.
