@@ -49,18 +49,22 @@ def main() -> int:
         "",
     ]
 
-    training_versions: dict[str, str] = {}
+    training_versions: dict[str, dict[str, object]] = {}
     for feature_set in ["full", "reduced"]:
         metadata = read_json_if_exists(args.output_dir / "hv2_training" / feature_set / "training_metadata.json")
-        if metadata is not None and metadata.get("sklearn_version"):
-            training_versions[feature_set] = str(metadata["sklearn_version"])
+        if metadata is not None:
+            training_versions[feature_set] = metadata
 
     lines.extend(["## Runtime Versions", ""])
     if training_versions:
-        for feature_set, version in training_versions.items():
-            lines.append(f"- `{feature_set}` training metadata recorded `scikit-learn=={version}`.")
+        for feature_set, metadata in training_versions.items():
+            package_versions = metadata.get("package_versions", {})
+            lines.append(
+                f"- `{feature_set}` recorded `scikit-learn=={package_versions.get('scikit-learn', metadata.get('sklearn_version'))}`, "
+                f"`xgboost=={package_versions.get('xgboost')}`, `lightgbm=={package_versions.get('lightgbm')}`."
+            )
     else:
-        lines.append("- No recorded `scikit-learn` runtime version was found yet.")
+        lines.append("- No recorded runtime version metadata was found yet.")
     lines.append("")
 
     data_check_json = read_json_if_exists(args.output_dir / "data_check" / "data_check_summary.json")
@@ -82,12 +86,22 @@ def main() -> int:
             lines.append(f"- `{feature_set}` leaderboard not found.")
             continue
         training_found = True
-        best_row = leaderboard.iloc[0]
+        selected = leaderboard.loc[leaderboard.get("selected_as_best_model_artifact", False) == True]  # noqa: E712
+        best_row = selected.iloc[0] if not selected.empty else leaderboard.iloc[0]
         lines.append(
-            f"- `{feature_set}` best model: `{best_row['model']}` with CV RMSE {best_row['cv_rmse_mean']:.4f}, holdout RMSE {best_row['holdout_rmse']:.4f}, holdout R2 {best_row['holdout_r2']:.4f}."
+            f"- `{feature_set}` selected ensemble artifact: `{best_row['model_label']}` with CV RMSE {best_row['cv_rmse_mean']:.4f}, "
+            f"holdout RMSE {best_row['holdout_rmse']:.4f}, holdout R2 {best_row['holdout_r2']:.4f}."
         )
     if not training_found:
         lines.append("- No training leaderboard is available yet.")
+    lines.append("")
+
+    hv2_report_path = args.output_dir / "reports" / "hv2_regression_report.md"
+    lines.extend(["## Hv2 Report", ""])
+    if hv2_report_path.exists():
+        lines.append(f"- Detailed regression report: `{hv2_report_path}`")
+    else:
+        lines.append("- Detailed Hv2 regression report was not found yet.")
     lines.append("")
 
     lines.extend(["## Age Group Stability", ""])
