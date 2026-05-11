@@ -9,11 +9,13 @@ import json
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
+import sklearn
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import ElasticNet, Ridge
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import make_scorer, mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, cross_validate, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -55,6 +57,14 @@ def detect_banned_columns(columns: list[str]) -> list[str]:
     """Detect forbidden input columns. / 检测禁止进入模型的输入列。"""
     banned = [column for column in columns if column in STRICT_BANNED_COLUMNS or column.startswith(STRICT_BANNED_PREFIXES)]
     return sorted(set(banned))
+
+
+def compute_rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
+    """中文：计算 RMSE，避免依赖 sklearn 的 squared=False 参数。
+    English: Compute RMSE without relying on sklearn's squared=False argument.
+    """
+    mse = mean_squared_error(y_true, y_pred)
+    return float(np.sqrt(mse))
 
 
 def build_model_registry() -> dict[str, Pipeline]:
@@ -135,7 +145,7 @@ def align_features_and_targets(features: pd.DataFrame, targets: pd.DataFrame, ta
 def compute_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]:
     """Compute regression metrics. / 计算回归评估指标。"""
     return {
-        "rmse": float(mean_squared_error(y_true, y_pred, squared=False)),
+        "rmse": compute_rmse(y_true, y_pred),
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "r2": float(r2_score(y_true, y_pred)),
     }
@@ -159,8 +169,9 @@ def main() -> int:
     )
 
     cv = KFold(n_splits=args.n_splits, shuffle=True, random_state=RANDOM_STATE)
+    rmse_scorer = make_scorer(compute_rmse, greater_is_better=False)
     scoring = {
-        "rmse": "neg_root_mean_squared_error",
+        "rmse": rmse_scorer,
         "mae": "neg_mean_absolute_error",
         "r2": "r2",
     }
@@ -220,11 +231,13 @@ def main() -> int:
         "random_state": RANDOM_STATE,
         "n_rows_after_target_filter": int(len(X)),
         "n_features": int(X.shape[1]),
+        "sklearn_version": sklearn.__version__,
     }
     (run_dir / "training_metadata.json").write_text(json.dumps(metadata_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(leaderboard.to_string(index=False))
     print(f"Best model: {best_model_name}")
+    print(f"scikit-learn version: {sklearn.__version__}")
     print(f"Wrote {run_dir / 'leaderboard.csv'}")
     print(f"Wrote {run_dir / 'best_model.joblib'}")
     print(f"Wrote {run_dir / 'best_model_holdout_predictions.csv'}")
