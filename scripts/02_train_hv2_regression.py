@@ -617,15 +617,21 @@ def main() -> int:
 
     update_aggregate_outputs(args.output_dir)
 
+    if selected_model_name is None:
+        raise RuntimeError(
+            "中文：没有任何主集成模型训练成功，因此不会让 baseline 替代主模型池。 "
+            "English: No main ensemble model trained successfully, so baselines are not allowed to replace the main model pool. "
+            f"See {args.output_dir / 'reports' / 'hv2_regression_report.md'} for failure reasons."
+        )
+
     print(leaderboard.to_string(index=False))
     print(f"Selected best ensemble model artifact: {selected_model_name}")
     print(f"scikit-learn version: {sklearn.__version__}")
     print(f"xgboost version: {package_versions.get('xgboost')}")
     print(f"lightgbm version: {package_versions.get('lightgbm')}")
     print(f"Wrote {run_dir / 'leaderboard.csv'}")
-    if selected_model_name is not None:
-        print(f"Wrote {run_dir / 'best_model.joblib'}")
-        print(f"Wrote {run_dir / 'best_model_holdout_predictions.csv'}")
+    print(f"Wrote {run_dir / 'best_model.joblib'}")
+    print(f"Wrote {run_dir / 'best_model_holdout_predictions.csv'}")
     print(f"Wrote {args.output_dir / 'tables' / 'hv2_model_comparison.csv'}")
     print(f"Wrote {args.output_dir / 'reports' / 'hv2_regression_report.md'}")
     return 0
