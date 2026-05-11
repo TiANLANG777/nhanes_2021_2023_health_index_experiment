@@ -105,12 +105,12 @@ def build_markdown_report(input_paths: dict[str, str], feature_summaries: list[d
                 f"### {item['feature_set']}",
                 "",
                 f"- File: `{item['file_name']}`",
-                f"- Rows: {item['rows']}`",
-                f"- Columns: {item['columns']}`",
-                f"- Duplicate rows: {item['duplicate_rows']}`",
-                f"- Mean missing rate: {item['mean_missing_rate']:.6f}`",
-                f"- Banned model-input columns found: {item['banned_column_count']}`",
-                f"- Target-overlap columns found: {item['target_overlap_count']}`",
+                f"- Rows: {item['rows']}",
+                f"- Columns: {item['columns']}",
+                f"- Duplicate rows: {item['duplicate_rows']}",
+                f"- Mean missing rate: {item['mean_missing_rate']:.6f}",
+                f"- Banned model-input columns found: {item['banned_column_count']}",
+                f"- Target-overlap columns found: {item['target_overlap_count']}",
                 "",
             ]
         )
@@ -132,7 +132,7 @@ def build_markdown_report(input_paths: dict[str, str], feature_summaries: list[d
     if leakage_frame.empty:
         lines.append("- No banned feature columns or target-overlap columns were detected in the raw feature files.")
     else:
-        lines.append(f"- Leakage rows written to `outputs/tables/leakage_check.csv`: {len(leakage_frame)}`")
+        lines.append(f"- Leakage rows written to `outputs/tables/leakage_check.csv`: {len(leakage_frame)}")
     return "\n".join(lines)
 
 
@@ -174,7 +174,7 @@ def main() -> int:
         "target_summary": target_summary,
     }
 
-    (tables_dir / "leakage_check.csv").write_text(leakage_check.to_csv(index=False, encoding="utf-8-sig"), encoding="utf-8-sig")
+    leakage_check.to_csv(tables_dir / "leakage_check.csv", index=False, encoding="utf-8-sig")
     report_text = build_markdown_report(input_paths, feature_summaries, target_summary, leakage_check)
     (reports_dir / "data_integrity_report.md").write_text(report_text, encoding="utf-8")
     (legacy_dir / "data_check_summary.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
