@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
@@ -61,6 +62,14 @@ def detect_banned_columns(columns: list[str]) -> list[str]:
     return sorted(set(banned))
 
 
+def compute_rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
+    """中文：计算 RMSE，避免依赖 sklearn 的 squared=False 参数。
+    English: Compute RMSE without relying on sklearn's squared=False argument.
+    """
+    mse = mean_squared_error(y_true, y_pred)
+    return float(np.sqrt(mse))
+
+
 def build_model_registry() -> dict[str, Pipeline]:
     """Create reusable model pipelines. / 创建可复用模型流水线。"""
     return {
@@ -104,7 +113,7 @@ def build_model_registry() -> dict[str, Pipeline]:
 def compute_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]:
     """Compute regression metrics. / 计算回归评估指标。"""
     return {
-        "rmse": float(mean_squared_error(y_true, y_pred, squared=False)),
+        "rmse": compute_rmse(y_true, y_pred),
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "r2": float(r2_score(y_true, y_pred)),
     }
