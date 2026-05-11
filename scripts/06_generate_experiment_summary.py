@@ -64,9 +64,17 @@ def build_hv2_tables(output_dir: Path) -> tuple[pd.DataFrame | None, pd.DataFram
     chapter4_hv2 = round_numeric_table(chapter4_hv2, digits=3)
     chapter4_hv2.to_csv(output_dir / "tables" / "chapter4_table_hv2_model_comparison.csv", index=False, encoding="utf-8-sig")
 
-    selected = hv2_success.loc[hv2_success.get("selected_as_best_model_artifact", False) == True].copy()  # noqa: E712
+    if "selected_as_best_model_artifact" in hv2_success.columns:
+        selected = hv2_success.loc[hv2_success["selected_as_best_model_artifact"] == True].copy()  # noqa: E712
+    else:
+        selected = pd.DataFrame()
     if selected.empty:
-        selected = hv2_success.loc[hv2_success["model_family"] == "ensemble"].sort_values("cv_rmse_mean").groupby("feature_set", as_index=False).head(1)
+        selected = (
+            hv2_success.loc[hv2_success["model_family"] == "ensemble"]
+            .sort_values("cv_rmse_mean")
+            .groupby("feature_set", as_index=False)
+            .head(1)
+        )
     full_vs_reduced = selected[
         [
             "feature_set",
@@ -143,6 +151,7 @@ def main() -> int:
     age_group_table = build_age_group_table(args.output_dir)
     hv1_table = build_hv1_table(args.output_dir)
     shap_table = build_shap_table(args.output_dir)
+    _ = hv1_table
 
     lines = [
         "# NHANES Experiment Summary",
