@@ -63,15 +63,99 @@ The actual `scikit-learn` version used at runtime is recorded in:
 - `outputs/hv2_training/reduced/training_metadata.json`
 - `outputs/experiment_summary/experiment_summary.md`
 
+## H_v2 训练与续跑 / H_v2 Training and Resume Workflow
+
+`scripts/02_train_hv2_regression.py` 现在支持单模型运行、断点续跑和分模型保存。  
+`scripts/02_train_hv2_regression.py` now supports single-model execution, resumable runs, and per-model artifacts.
+
+可选模型 / Available model values:
+
+- `random_forest`
+- `gradient_boosting`
+- `xgboost`
+- `lightgbm`
+- `ridge`
+- `elastic_net`
+- `all`
+
+默认值 / Default value:
+
+- `all`
+
+推荐在 Colab 中按模型运行。  
+It is recommended to run models one by one in Colab.
+
+示例命令 / Example commands:
+
+```bash
+python scripts/02_train_hv2_regression.py \
+  --feature-set full \
+  --model random_forest \
+  --data-dir /content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/data \
+  --output-dir /content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/outputs
+```
+
+```bash
+python scripts/02_train_hv2_regression.py \
+  --feature-set reduced \
+  --model lightgbm \
+  --data-dir /content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/data \
+  --output-dir /content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/outputs
+```
+
+如果某个模型已经成功完成，且没有传入 `--force`，脚本会自动跳过它。  
+If a model already finished successfully and `--force` is not provided, the script skips it automatically.
+
+如需强制重跑某个模型，可使用：  
+To rerun a finished model deliberately, use:
+
+```bash
+python scripts/02_train_hv2_regression.py \
+  --feature-set full \
+  --model xgboost \
+  --force \
+  --data-dir /content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/data \
+  --output-dir /content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/outputs
+```
+
+每个模型的单独产物会保存到：  
+Per-model artifacts are saved to:
+
+- `outputs/hv2_training/{feature_set}/model_results/{model_name}_metrics.json`
+- `outputs/hv2_training/{feature_set}/model_results/{model_name}_predictions.csv`
+- `outputs/hv2_training/{feature_set}/model_results/{model_name}.joblib`
+- `outputs/hv2_training/{feature_set}/model_results/{model_name}_error.txt`
+
+成功模型结束后会自动更新：  
+After each model finishes, the script automatically updates:
+
+- `outputs/hv2_training/{feature_set}/leaderboard.csv`
+- `outputs/tables/hv2_model_comparison.csv`
+- `outputs/reports/hv2_regression_report.md`
+
+## 当前 Colab 友好设置 / Current Colab-Friendly Settings
+
+为了减少 Colab 被中断的概率，当前实现包含这些约束：  
+To reduce the chance of Colab interruption, the current implementation includes these constraints:
+
+- `train/test split` 保持 `80/20`。 / `train/test split` stays at `80/20`.
+- `random_state` 固定为 `42`。 / `random_state` is fixed at `42`.
+- `5-fold cross-validation` 只在训练集内部执行。 / `5-fold cross-validation` runs only inside the training split.
+- `cross_validate(..., n_jobs=1)` 避免嵌套并行。 / `cross_validate(..., n_jobs=1)` avoids nested parallelism.
+- `RandomForestRegressor` 使用中等复杂度参数。 / `RandomForestRegressor` uses a moderate-complexity configuration.
+- 缺失值填补只在 `Pipeline` 内进行。 / Missing-value imputation stays inside the `Pipeline`.
+
 ## 建议的 Colab 使用方式 / Suggested Colab Workflow
 
 1. Mount Google Drive.
 2. Clone this repository to `/content/nhanes_2021_2023_health_index_experiment`.
 3. Install `requirements_colab.txt`.
-4. Run the notebook from top to bottom.
+4. Run `scripts/01_data_check.py` first.
+5. Run `scripts/02_train_hv2_regression.py` one model at a time for `full` and `reduced`.
+6. After main training is complete, run age-group stability, `H_v1` sensitivity, SHAP, and summary scripts.
 
-如果仓库被克隆到其他目录，请同步修改 notebook 中的 `PROJECT_ROOT`。  
-If the repository is cloned elsewhere, update `PROJECT_ROOT` in the notebook accordingly.
+如果仓库被克隆到其他目录，请同步修改 notebook 中的 `REPO_DIR`。  
+If the repository is cloned elsewhere, update `REPO_DIR` in the notebook accordingly.
 
 ## 当前范围边界 / Current Scope Boundary
 
