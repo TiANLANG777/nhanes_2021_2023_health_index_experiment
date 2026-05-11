@@ -1,5 +1,5 @@
-"""Assess Hv2 regression stability across age groups.
-评估 Hv2 回归在不同年龄组中的稳定性。
+"""Assess Hv2 prediction stability across age groups from saved artifacts.
+基于已保存产物评估 Hv2 预测在不同年龄组中的稳定性。
 """
 
 from __future__ import annotations
@@ -9,260 +9,126 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import ElasticNet, Ridge
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import KFold, cross_val_predict
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, r2_score
 
-try:
-    from xgboost import XGBRegressor
-except Exception as exc:  # pragma: no cover - runtime environment dependent
-    XGBRegressor = None
-    XGBOOST_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
-else:
-    XGBOOST_IMPORT_ERROR = ""
-
-try:
-    from lightgbm import LGBMRegressor
-except Exception as exc:  # pragma: no cover - runtime environment dependent
-    LGBMRegressor = None
-    LIGHTGBM_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
-else:
-    LIGHTGBM_IMPORT_ERROR = ""
-
-
-DEFAULT_DATA_DIR = Path("/content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/data")
-DEFAULT_OUTPUT_DIR = Path("/content/drive/MyDrive/nhanes_2021_2023_health_index_experiment/outputs")
-FEATURE_FILES = {
-    "full": "adult_full_feature_set_v2.csv",
-    "reduced": "adult_reduced_feature_set_v2.csv",
-}
-TARGET_FILE = "adult_targets_v2.csv"
-STRICT_BANNED_COLUMNS = {
-    "SEQN",
-    "H_v1",
-    "H_v2",
-    "R",
-    "R_v2",
-    "H_grade",
-    "H_grade_quantile",
-    "available_risk_dimensions",
-    "age_group",
-}
-STRICT_BANNED_PREFIXES = ("r_",)
-RANDOM_STATE = 42
-MODEL_CHOICES = ["ridge", "elastic_net", "random_forest", "gradient_boosting", "xgboost", "lightgbm"]
+from experiment_utils import DEFAULT_DATA_DIR, DEFAULT_OUTPUT_DIR, FEATURE_FILES, TARGET_FILE, compute_rmse, derive_age_group, safe_float_text
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments. / 解析命令行参数。"""
-    parser = argparse.ArgumentParser(description="Run age-group stability checks for H_v2 models.")
-    parser.add_argument("--feature-set", choices=sorted(FEATURE_FILES), default="full", help="Feature set to evaluate.")
-    parser.add_argument(
-        "--model",
-        choices=MODEL_CHOICES,
-        default="random_forest",
-        help="Model family for subgroup evaluation.",
-    )
+    parser = argparse.ArgumentParser(description="Run age-group stability checks from saved Hv2 prediction artifacts.")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Directory containing input CSV files.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory for generated outputs.")
-    parser.add_argument("--n-splits", type=int, default=5, help="Number of CV folds.")
     return parser.parse_args()
 
 
-def detect_banned_columns(columns: list[str]) -> list[str]:
-    """Detect forbidden input columns. / 检测禁止进入模型的输入列。"""
-    banned = [column for column in columns if column in STRICT_BANNED_COLUMNS or column.startswith(STRICT_BANNED_PREFIXES)]
-    return sorted(set(banned))
+def resolve_age_group(prediction_frame: pd.DataFrame, targets: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """Resolve age_group by direct column or merge key. / 通过现有列或合并键解析 age_group。"""
+    if "age_group" in prediction_frame.columns and prediction_frame["age_group"].notna().any():
+        resolved = prediction_frame.copy()
+        resolved["age_group"] = resolved["age_group"].fillna("missing")
+        return resolved, "prediction_file.age_group"
+
+    target_frame = targets.reset_index(drop=True).copy()
+    target_frame["row_id"] = np.arange(len(target_frame))
+    if "age_group" not in target_frame.columns:
+        if "RIDAGEYR" not in target_frame.columns:
+            raise ValueError("Cannot derive age_group because both age_group and RIDAGEYR are missing in adult_targets_v2.csv.")
+        target_frame["age_group"] = derive_age_group(target_frame["RIDAGEYR"])
+    else:
+        target_frame["age_group"] = target_frame["age_group"].fillna("missing")
+
+    for merge_key in ["row_id", "SEQN"]:
+        if merge_key in prediction_frame.columns and merge_key in target_frame.columns:
+            merged = prediction_frame.merge(target_frame[[merge_key, "age_group"]], on=merge_key, how="left", suffixes=("", "_target"))
+            if merged["age_group"].notna().any():
+                return merged, merge_key
+
+    raise ValueError(
+        "Unable to attach age_group to best_model_holdout_predictions.csv. "
+        "Expected an existing age_group column or a merge key such as row_id or SEQN."
+    )
 
 
-def compute_rmse(y_true: pd.Series, y_pred: pd.Series) -> float:
-    """中文：计算 RMSE，避免依赖 sklearn 的 squared=False 参数。
-    English: Compute RMSE without relying on sklearn's squared=False argument.
-    """
-    mse = mean_squared_error(y_true, y_pred)
-    return float(np.sqrt(mse))
-
-
-def build_model_registry() -> dict[str, Pipeline]:
-    """Create reusable model pipelines. / 创建可复用模型流水线。"""
-    registry: dict[str, Pipeline] = {
-        "ridge": Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                ("scaler", StandardScaler()),
-                ("model", Ridge(alpha=1.0, random_state=RANDOM_STATE)),
-            ]
-        ),
-        "elastic_net": Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                ("scaler", StandardScaler()),
-                ("model", ElasticNet(alpha=0.01, l1_ratio=0.5, max_iter=5000, random_state=RANDOM_STATE)),
-            ]
-        ),
-        "random_forest": Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                (
-                    "model",
-                    RandomForestRegressor(
-                        n_estimators=400,
-                        min_samples_leaf=2,
-                        n_jobs=-1,
-                        random_state=RANDOM_STATE,
-                    ),
-                ),
-            ]
-        ),
-        "gradient_boosting": Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                ("model", GradientBoostingRegressor(random_state=RANDOM_STATE)),
-            ]
-        ),
-    }
-
-    if XGBRegressor is not None:
-        registry["xgboost"] = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                (
-                    "model",
-                    XGBRegressor(
-                        objective="reg:squarederror",
-                        n_estimators=400,
-                        learning_rate=0.05,
-                        max_depth=4,
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        n_jobs=-1,
-                        random_state=RANDOM_STATE,
-                        verbosity=0,
-                    ),
-                ),
-            ]
-        )
-    if LGBMRegressor is not None:
-        registry["lightgbm"] = Pipeline(
-            steps=[
-                ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
-                (
-                    "model",
-                    LGBMRegressor(
-                        n_estimators=400,
-                        learning_rate=0.05,
-                        num_leaves=31,
-                        subsample=0.8,
-                        colsample_bytree=0.8,
-                        n_jobs=-1,
-                        random_state=RANDOM_STATE,
-                        verbosity=-1,
-                    ),
-                ),
-            ]
-        )
-    return registry
-
-
-def derive_age_group(age_series: pd.Series) -> pd.Series:
-    """Derive age groups if they are missing. / 在缺少年龄组时重新派生年龄组。"""
-    age = pd.to_numeric(age_series, errors="coerce")
-    groups = pd.Series("missing", index=age.index, dtype="object")
-    groups[(age >= 18) & (age < 35)] = "18-35"
-    groups[(age >= 35) & (age <= 50)] = "35-50"
-    groups[age > 50] = ">50"
-    groups[age.isna()] = "missing"
-    return groups
-
-
-def compute_group_metrics(frame: pd.DataFrame) -> dict[str, float | int | str]:
-    """Compute regression metrics for one subgroup. / 为单个子组计算回归指标。"""
+def compute_group_metrics(frame: pd.DataFrame, feature_set: str, model_name: str) -> dict[str, object]:
+    """Compute metrics for one age group. / 计算单个年龄组的指标。"""
     y_true = frame["H_v2_true"]
     y_pred = frame["H_v2_pred"]
+    residual = y_true - y_pred
     return {
+        "feature_set": feature_set,
+        "model": model_name,
         "age_group": str(frame["age_group"].iloc[0]),
         "n": int(len(frame)),
         "rmse": compute_rmse(y_true, y_pred),
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "r2": float(r2_score(y_true, y_pred)) if len(frame) > 1 else float("nan"),
-        "mean_error": float((y_pred - y_true).mean()),
+        "mean_residual": float(np.mean(residual)),
     }
 
 
 def main() -> int:
-    """Run age-group stability analysis. / 运行年龄组稳定性分析。"""
+    """Run age-group stability analysis without retraining. / 在不重训模型的前提下运行年龄组稳定性分析。"""
     args = parse_args()
-    output_dir = args.output_dir / "age_group_stability"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir = args.output_dir / "tables"
+    reports_dir = args.output_dir / "reports"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
-    features = pd.read_csv(args.data_dir / FEATURE_FILES[args.feature_set])
     targets = pd.read_csv(args.data_dir / TARGET_FILE)
-    banned_columns = detect_banned_columns(features.columns.tolist())
-    features = features.drop(columns=banned_columns, errors="ignore").apply(pd.to_numeric, errors="coerce")
-
-    if len(features) != len(targets):
-        raise ValueError("Feature rows and target rows do not match. Please regenerate aligned CSV files.")
-
-    registry = build_model_registry()
-    if args.model not in registry:
-        if args.model == "xgboost":
-            raise ImportError(
-                "中文：XGBoost 不可用。 English: XGBoost is unavailable. "
-                f"Original error: {XGBOOST_IMPORT_ERROR}"
-            )
-        if args.model == "lightgbm":
-            raise ImportError(
-                "中文：LightGBM 不可用。 English: LightGBM is unavailable. "
-                f"Original error: {LIGHTGBM_IMPORT_ERROR}"
-            )
-        raise KeyError(f"Unsupported model: {args.model}")
-
-    y = pd.to_numeric(targets["H_v2"], errors="coerce")
-    keep_mask = y.notna()
-    X = features.loc[keep_mask].reset_index(drop=True)
-    y = y.loc[keep_mask].reset_index(drop=True)
-    metadata = targets.loc[keep_mask].reset_index(drop=True).copy()
-
-    if "age_group" not in metadata.columns:
-        metadata["age_group"] = derive_age_group(metadata["RIDAGEYR"])
-    else:
-        metadata["age_group"] = metadata["age_group"].fillna("missing")
-
-    model = registry[args.model]
-    cv = KFold(n_splits=args.n_splits, shuffle=True, random_state=RANDOM_STATE)
-
-    # Use out-of-fold predictions to avoid optimistic subgroup metrics. / 使用折外预测避免过于乐观的分组指标。
-    predictions = cross_val_predict(model, X, y, cv=cv, n_jobs=None)
-    prediction_frame = metadata[[column for column in ["SEQN", "RIDAGEYR", "age_group"] if column in metadata.columns]].copy()
-    prediction_frame["H_v2_true"] = y
-    prediction_frame["H_v2_pred"] = predictions
-    prediction_frame["abs_error"] = (prediction_frame["H_v2_true"] - prediction_frame["H_v2_pred"]).abs()
-
-    rows = [
-        {
-            "age_group": "overall",
-            "n": int(len(prediction_frame)),
-            "rmse": compute_rmse(prediction_frame["H_v2_true"], prediction_frame["H_v2_pred"]),
-            "mae": float(mean_absolute_error(prediction_frame["H_v2_true"], prediction_frame["H_v2_pred"])),
-            "r2": float(r2_score(prediction_frame["H_v2_true"], prediction_frame["H_v2_pred"])),
-            "mean_error": float((prediction_frame["H_v2_pred"] - prediction_frame["H_v2_true"]).mean()),
-        }
+    rows: list[dict[str, object]] = []
+    report_lines = [
+        "# Age Group Stability Report",
+        "",
+        "This analysis only reads saved Hv2 prediction artifacts.",
+        "该分析只读取已保存的 Hv2 预测产物，不会重新训练模型。",
+        "",
     ]
-    rows.extend(compute_group_metrics(group) for _, group in prediction_frame.groupby("age_group", dropna=False))
+
+    for feature_set in FEATURE_FILES:
+        prediction_path = args.output_dir / "hv2_training" / feature_set / "best_model_holdout_predictions.csv"
+        metadata_path = args.output_dir / "hv2_training" / feature_set / "training_metadata.json"
+        if not prediction_path.exists():
+            report_lines.append(f"- `{feature_set}`: missing `{prediction_path}`.")
+            continue
+        if not metadata_path.exists():
+            report_lines.append(f"- `{feature_set}`: missing `{metadata_path}`.")
+            continue
+
+        prediction_frame = pd.read_csv(prediction_path)
+        metadata = pd.read_json(metadata_path, typ="series")
+        model_name = str(metadata.get("selected_model_name", "unknown"))
+        resolved_frame, merge_source = resolve_age_group(prediction_frame, targets)
+        if resolved_frame["age_group"].isna().all():
+            raise ValueError(f"All age_group values are missing after merge for feature_set={feature_set}.")
+
+        overall = resolved_frame.copy()
+        overall["age_group"] = "overall"
+        rows.append(compute_group_metrics(overall, feature_set, model_name))
+        for _, group in resolved_frame.groupby("age_group", dropna=False):
+            rows.append(compute_group_metrics(group, feature_set, model_name))
+        report_lines.append(f"- `{feature_set}` merged age_group via `{merge_source}` using model `{model_name}`.")
+
+    if not rows:
+        raise FileNotFoundError("No best_model_holdout_predictions.csv files were found. Run Hv2 model training first.")
+
     summary = pd.DataFrame(rows)
+    summary.to_csv(tables_dir / "age_group_stability.csv", index=False, encoding="utf-8-sig")
 
-    stem = f"{args.feature_set}_{args.model}"
-    prediction_frame.to_csv(output_dir / f"age_group_predictions_{stem}.csv", index=False, encoding="utf-8-sig")
-    summary.to_csv(output_dir / f"age_group_stability_{stem}.csv", index=False, encoding="utf-8-sig")
+    report_lines.extend(["", "## Summary", ""])
+    for feature_set in FEATURE_FILES:
+        subset = summary.loc[(summary["feature_set"] == feature_set) & (summary["age_group"] == "overall")]
+        if subset.empty:
+            continue
+        row = subset.iloc[0]
+        report_lines.append(
+            f"- `{feature_set}` overall MAE={safe_float_text(row['mae'])}, RMSE={safe_float_text(row['rmse'])}, R2={safe_float_text(row['r2'])}."
+        )
 
+    (reports_dir / "age_group_stability_report.md").write_text("\n".join(report_lines), encoding="utf-8")
     print(summary.to_string(index=False))
-    print(f"Dropped banned columns: {banned_columns}")
-    print(f"Wrote {output_dir / f'age_group_predictions_{stem}.csv'}")
-    print(f"Wrote {output_dir / f'age_group_stability_{stem}.csv'}")
+    print(f"Wrote {tables_dir / 'age_group_stability.csv'}")
+    print(f"Wrote {reports_dir / 'age_group_stability_report.md'}")
     return 0
 
 
