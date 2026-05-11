@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import joblib
@@ -71,6 +72,8 @@ MODEL_CATALOG = [
     {"model": "ridge", "model_label": "Ridge", "model_family": "baseline"},
     {"model": "elastic_net", "model_label": "ElasticNet", "model_family": "baseline"},
 ]
+MODEL_LOOKUP = {item["model"]: item for item in MODEL_CATALOG}
+MODEL_CHOICES = [item["model"] for item in MODEL_CATALOG]
 LEADERBOARD_COLUMNS = [
     "feature_set",
     "model",
@@ -101,6 +104,8 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments. / 解析命令行参数。"""
     parser = argparse.ArgumentParser(description="Train thesis-aligned regressors for H_v2.")
     parser.add_argument("--feature-set", choices=sorted(FEATURE_FILES), default="full", help="Feature set to use.")
+    parser.add_argument("--model", choices=[*MODEL_CHOICES, "all"], default="all", help="Run one model or the full model pool.")
+    parser.add_argument("--force", action="store_true", help="Rerun a model even if its saved artifacts already exist.")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Directory containing input CSV files.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directory for experiment outputs.")
     parser.add_argument("--n-splits", type=int, default=5, help="Number of CV folds inside the training split.")
@@ -144,8 +149,9 @@ def build_model_registry() -> tuple[dict[str, dict[str, object]], dict[str, str]
                     (
                         "model",
                         RandomForestRegressor(
-                            n_estimators=400,
-                            min_samples_leaf=2,
+                            n_estimators=150,
+                            max_depth=12,
+                            min_samples_leaf=5,
                             n_jobs=-1,
                             random_state=RANDOM_STATE,
                         ),
@@ -210,12 +216,12 @@ def build_model_registry() -> tuple[dict[str, dict[str, object]], dict[str, str]
                         "model",
                         XGBRegressor(
                             objective="reg:squarederror",
-                            n_estimators=400,
+                            n_estimators=300,
                             learning_rate=0.05,
                             max_depth=4,
                             subsample=0.8,
                             colsample_bytree=0.8,
-                            n_jobs=-1,
+                            n_jobs=2,
                             random_state=RANDOM_STATE,
                             verbosity=0,
                         ),
@@ -240,12 +246,12 @@ def build_model_registry() -> tuple[dict[str, dict[str, object]], dict[str, str]
                     (
                         "model",
                         LGBMRegressor(
-                            n_estimators=400,
+                            n_estimators=300,
                             learning_rate=0.05,
                             num_leaves=31,
                             subsample=0.8,
                             colsample_bytree=0.8,
-                            n_jobs=-1,
+                            n_jobs=2,
                             random_state=RANDOM_STATE,
                             verbosity=-1,
                         ),
@@ -293,14 +299,57 @@ def compute_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]:
     """Compute regression metrics. / 计算回归评估指标。"""
     residual = y_true - y_pred
     return {
-        "rmse": compute_rmse(y_true, y_pred),
-        "mae": float(mean_absolute_error(y_true, y_pred)),
-        "r2": float(r2_score(y_true, y_pred)),
-        "spearman": compute_spearman(y_true, y_pred),
+        "holdout_rmse": compute_rmse(y_true, y_pred),
+        "holdout_mae": float(mean_absolute_error(y_true, y_pred)),
+        "holdout_r2": float(r2_score(y_true, y_pred)),
+        "holdout_spearman": compute_spearman(y_true, y_pred),
         "mean_residual": float(np.mean(residual)),
         "std_residual": float(np.std(residual)),
         "prediction_min": float(np.min(y_pred)),
         "prediction_max": float(np.max(y_pred)),
+    }
+
+
+def get_model_result_paths(model_results_dir: Path, model_name: str) -> dict[str, Path]:
+    """Get all file paths for one model result bundle. / 获取单模型结果文件路径。"""
+    return {
+        "metrics": model_results_dir / f"{model_name}_metrics.json",
+        "predictions": model_results_dir / f"{model_name}_predictions.csv",
+        "artifact": model_results_dir / f"{model_name}.joblib",
+        "error": model_results_dir / f"{model_name}_error.txt",
+    }
+
+
+def success_artifacts_exist(paths: dict[str, Path]) -> bool:
+    """Check whether a model already finished successfully. / 检查模型是否已成功完成。"""
+    return paths["metrics"].exists() and paths["predictions"].exists() and paths["artifact"].exists()
+
+
+def build_success_row(feature_set: str, model_name: str, model_label: str, model_family: str, cv_result: dict[str, np.ndarray], holdout_metrics: dict[str, float], n_train: int, n_test: int) -> dict[str, object]:
+    """Create the saved metric row for one successful model. / 为成功模型创建指标记录。"""
+    return {
+        "feature_set": feature_set,
+        "model": model_name,
+        "model_label": model_label,
+        "model_family": model_family,
+        "status": "success",
+        "failure_reason": "",
+        "selected_as_best_model_artifact": False,
+        "cv_rmse_mean": float(-cv_result["test_rmse"].mean()),
+        "cv_rmse_std": float(cv_result["test_rmse"].std()),
+        "cv_mae_mean": float(-cv_result["test_mae"].mean()),
+        "cv_r2_mean": float(cv_result["test_r2"].mean()),
+        "cv_spearman_mean": float(np.nanmean(cv_result["test_spearman"])),
+        "holdout_rmse": holdout_metrics["holdout_rmse"],
+        "holdout_mae": holdout_metrics["holdout_mae"],
+        "holdout_r2": holdout_metrics["holdout_r2"],
+        "holdout_spearman": holdout_metrics["holdout_spearman"],
+        "mean_residual": holdout_metrics["mean_residual"],
+        "std_residual": holdout_metrics["std_residual"],
+        "prediction_min": holdout_metrics["prediction_min"],
+        "prediction_max": holdout_metrics["prediction_max"],
+        "n_train": int(n_train),
+        "n_test": int(n_test),
     }
 
 
@@ -330,6 +379,39 @@ def safe_float_text(value: object, digits: int = 4) -> str:
     return f"{float(value):.{digits}f}"
 
 
+def load_saved_rows(feature_set: str, model_results_dir: Path, n_train: int, n_test: int) -> pd.DataFrame:
+    """Collect saved success and failure rows. / 汇总已保存的成功与失败记录。"""
+    rows: list[dict[str, object]] = []
+    for model_spec in MODEL_CATALOG:
+        model_name = model_spec["model"]
+        paths = get_model_result_paths(model_results_dir, model_name)
+        if paths["metrics"].exists():
+            row = json.loads(paths["metrics"].read_text(encoding="utf-8"))
+            row["selected_as_best_model_artifact"] = False
+            rows.append(row)
+            continue
+        if paths["error"].exists():
+            failure_reason = paths["error"].read_text(encoding="utf-8").strip()
+            rows.append(
+                make_failure_row(
+                    feature_set=feature_set,
+                    model_name=model_name,
+                    model_label=model_spec["model_label"],
+                    model_family=model_spec["model_family"],
+                    failure_reason=failure_reason,
+                    n_train=n_train,
+                    n_test=n_test,
+                )
+            )
+    if not rows:
+        return pd.DataFrame(columns=LEADERBOARD_COLUMNS)
+    leaderboard = pd.DataFrame(rows)
+    for column in LEADERBOARD_COLUMNS:
+        if column not in leaderboard.columns:
+            leaderboard[column] = np.nan
+    return leaderboard[LEADERBOARD_COLUMNS]
+
+
 def update_aggregate_outputs(output_dir: Path) -> None:
     """Update the combined table and markdown report. / 更新汇总总表与 Markdown 报告。"""
     tables_dir = output_dir / "tables"
@@ -349,6 +431,9 @@ def update_aggregate_outputs(output_dir: Path) -> None:
 
     combined = pd.concat(combined_frames, ignore_index=True) if combined_frames else pd.DataFrame(columns=LEADERBOARD_COLUMNS)
     if not combined.empty:
+        for column in LEADERBOARD_COLUMNS:
+            if column not in combined.columns:
+                combined[column] = np.nan
         combined = combined[LEADERBOARD_COLUMNS]
     combined.to_csv(tables_dir / "hv2_model_comparison.csv", index=False, encoding="utf-8-sig")
 
@@ -427,6 +512,7 @@ def update_aggregate_outputs(output_dir: Path) -> None:
             lines.append(f"- Leakage columns removed before fitting: {metadata.get('dropped_banned_columns', [])}")
             lines.append(f"- Train/test split: 80/20 with `random_state=42`.")
             lines.append(f"- Cross-validation: 5-fold inside the training split only.")
+            lines.append(f"- Requested model mode in last run: `{metadata.get('requested_model_mode')}`.")
         lines.append("")
 
     if not combined.empty:
@@ -449,11 +535,63 @@ def update_aggregate_outputs(output_dir: Path) -> None:
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def finalize_feature_set_outputs(output_dir: Path, feature_set: str, model_results_dir: Path, banned_columns: list[str], n_train: int, n_test: int, args: argparse.Namespace, package_versions: dict[str, str | None], package_import_errors: dict[str, str | None], n_rows_after_target_filter: int, n_features: int) -> pd.DataFrame:
+    """Rebuild the leaderboard and selected best artifact. / 重建排行榜与最佳模型产物。"""
+    run_dir = output_dir / "hv2_training" / feature_set
+    leaderboard = load_saved_rows(feature_set, model_results_dir, n_train=n_train, n_test=n_test)
+
+    selected_model_name = None
+    selected_model_family = None
+    if not leaderboard.empty:
+        successful_ensembles = leaderboard.loc[
+            (leaderboard["status"] == "success") & (leaderboard["model_family"] == "ensemble")
+        ].sort_values("cv_rmse_mean")
+        if not successful_ensembles.empty:
+            selected_model_name = str(successful_ensembles.iloc[0]["model"])
+            selected_model_family = str(successful_ensembles.iloc[0]["model_family"])
+            leaderboard.loc[leaderboard["model"] == selected_model_name, "selected_as_best_model_artifact"] = True
+
+            selected_paths = get_model_result_paths(model_results_dir, selected_model_name)
+            shutil.copyfile(selected_paths["artifact"], run_dir / "best_model.joblib")
+            shutil.copyfile(selected_paths["predictions"], run_dir / "best_model_holdout_predictions.csv")
+
+        sort_rank = {"success": 0, "failed": 1}
+        leaderboard["_sort_status"] = leaderboard["status"].map(sort_rank).fillna(9)
+        leaderboard = leaderboard.sort_values(["_sort_status", "cv_rmse_mean", "model_family", "model"]).drop(columns=["_sort_status"])
+    leaderboard.to_csv(run_dir / "leaderboard.csv", index=False, encoding="utf-8-sig")
+
+    metadata_payload = {
+        "feature_set": feature_set,
+        "target_column": "H_v2",
+        "selected_model_name": selected_model_name,
+        "selected_model_family": selected_model_family,
+        "dropped_banned_columns": banned_columns,
+        "random_state": RANDOM_STATE,
+        "train_test_split": "80/20",
+        "cv_strategy": f"{args.n_splits}-fold on training split only",
+        "requested_model_mode": args.model,
+        "force_rerun": bool(args.force),
+        "n_rows_after_target_filter": int(n_rows_after_target_filter),
+        "n_features": int(n_features),
+        "sklearn_version": sklearn.__version__,
+        "package_versions": package_versions,
+        "package_import_errors": package_import_errors,
+        "model_statuses": leaderboard[["model", "model_family", "status", "failure_reason"]].to_dict(orient="records") if not leaderboard.empty else [],
+    }
+    (run_dir / "training_metadata.json").write_text(json.dumps(metadata_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    pd.DataFrame({"feature": range(n_features)}).to_csv(run_dir / "feature_columns.csv", index=False, encoding="utf-8-sig")
+    update_aggregate_outputs(output_dir)
+    return leaderboard
+
+
 def main() -> int:
     """Train thesis-aligned regressors and save artifacts. / 按论文协议训练回归模型并保存产物。"""
     args = parse_args()
     run_dir = args.output_dir / "hv2_training" / args.feature_set
+    model_results_dir = run_dir / "model_results"
     run_dir.mkdir(parents=True, exist_ok=True)
+    model_results_dir.mkdir(parents=True, exist_ok=True)
 
     features, targets, banned_columns = load_bundle(args.data_dir, args.feature_set)
     X, y, metadata = align_features_and_targets(features, targets, target_column="H_v2")
@@ -466,11 +604,19 @@ def main() -> int:
         random_state=RANDOM_STATE,
     )
 
+    feature_columns = pd.DataFrame({"feature": X.columns.tolist()})
+    feature_columns.to_csv(run_dir / "feature_columns.csv", index=False, encoding="utf-8-sig")
+
     registry, import_failures, package_versions = build_model_registry()
     package_import_errors = {
         "xgboost": XGBOOST_IMPORT_ERROR or None,
         "lightgbm": LIGHTGBM_IMPORT_ERROR or None,
     }
+
+    if args.model == "all":
+        requested_models = MODEL_CHOICES
+    else:
+        requested_models = [args.model]
 
     cv = KFold(n_splits=args.n_splits, shuffle=True, random_state=RANDOM_STATE)
     scoring = {
@@ -480,28 +626,33 @@ def main() -> int:
         "spearman": make_scorer(compute_spearman, greater_is_better=True),
     }
 
-    rows: list[dict[str, object]] = []
-    holdout_predictions: dict[str, pd.DataFrame] = {}
+    for model_name in requested_models:
+        model_spec = MODEL_LOOKUP[model_name]
+        paths = get_model_result_paths(model_results_dir, model_name)
 
-    for model_spec in MODEL_CATALOG:
-        model_name = model_spec["model"]
-        model_label = model_spec["model_label"]
-        model_family = model_spec["model_family"]
+        if success_artifacts_exist(paths) and not args.force:
+            print(f"Skipping completed model: feature_set={args.feature_set}, model={model_name}")
+            continue
+
+        print(f"Running H_v2 regression: feature_set={args.feature_set}, model={model_name}")
 
         if model_name in import_failures:
             failure_reason = import_failures[model_name]
-            rows.append(
-                make_failure_row(
-                    feature_set=args.feature_set,
-                    model_name=model_name,
-                    model_label=model_label,
-                    model_family=model_family,
-                    failure_reason=failure_reason,
-                    n_train=len(X_train),
-                    n_test=len(X_test),
-                )
+            paths["error"].write_text(failure_reason, encoding="utf-8")
+            print(f"Model import failure: {model_name} -> {failure_reason}")
+            finalize_feature_set_outputs(
+                output_dir=args.output_dir,
+                feature_set=args.feature_set,
+                model_results_dir=model_results_dir,
+                banned_columns=banned_columns,
+                n_train=len(X_train),
+                n_test=len(X_test),
+                args=args,
+                package_versions=package_versions,
+                package_import_errors=package_import_errors,
+                n_rows_after_target_filter=len(X),
+                n_features=X.shape[1],
             )
-            print(f"Model failed before training: {model_label} -> {failure_reason}")
             continue
 
         pipeline = registry[model_name]["pipeline"]
@@ -513,125 +664,76 @@ def main() -> int:
                 y_train,
                 cv=cv,
                 scoring=scoring,
-                n_jobs=None,
+                n_jobs=1,
                 error_score="raise",
             )
-            pipeline.fit(X_train, y_train)
-            holdout_pred = pd.Series(pipeline.predict(X_test), index=y_test.index, name="H_v2_pred")
+            holdout_pipeline = clone(pipeline)
+            holdout_pipeline.fit(X_train, y_train)
+            holdout_pred = pd.Series(holdout_pipeline.predict(X_test), index=y_test.index, name="H_v2_pred")
             holdout_metrics = compute_metrics(y_test, holdout_pred)
 
-            row = {
-                "feature_set": args.feature_set,
-                "model": model_name,
-                "model_label": model_label,
-                "model_family": model_family,
-                "status": "success",
-                "failure_reason": "",
-                "selected_as_best_model_artifact": False,
-                "cv_rmse_mean": float(-cv_result["test_rmse"].mean()),
-                "cv_rmse_std": float(cv_result["test_rmse"].std()),
-                "cv_mae_mean": float(-cv_result["test_mae"].mean()),
-                "cv_r2_mean": float(cv_result["test_r2"].mean()),
-                "cv_spearman_mean": float(np.nanmean(cv_result["test_spearman"])),
-                "holdout_rmse": holdout_metrics["rmse"],
-                "holdout_mae": holdout_metrics["mae"],
-                "holdout_r2": holdout_metrics["r2"],
-                "holdout_spearman": holdout_metrics["spearman"],
-                "mean_residual": holdout_metrics["mean_residual"],
-                "std_residual": holdout_metrics["std_residual"],
-                "prediction_min": holdout_metrics["prediction_min"],
-                "prediction_max": holdout_metrics["prediction_max"],
-                "n_train": int(len(X_train)),
-                "n_test": int(len(X_test)),
-            }
-            rows.append(row)
+            result_row = build_success_row(
+                feature_set=args.feature_set,
+                model_name=model_name,
+                model_label=model_spec["model_label"],
+                model_family=model_spec["model_family"],
+                cv_result=cv_result,
+                holdout_metrics=holdout_metrics,
+                n_train=len(X_train),
+                n_test=len(X_test),
+            )
+            paths["metrics"].write_text(json.dumps(result_row, indent=2, ensure_ascii=False), encoding="utf-8")
 
             prediction_frame = meta_test.reset_index(drop=True).copy()
             prediction_frame["H_v2_true"] = y_test.reset_index(drop=True)
             prediction_frame["H_v2_pred"] = holdout_pred.reset_index(drop=True)
             prediction_frame["abs_error"] = (prediction_frame["H_v2_true"] - prediction_frame["H_v2_pred"]).abs()
             prediction_frame["residual"] = prediction_frame["H_v2_true"] - prediction_frame["H_v2_pred"]
-            holdout_predictions[model_name] = prediction_frame
+            prediction_frame.to_csv(paths["predictions"], index=False, encoding="utf-8-sig")
+
+            fitted_full_pipeline = clone(pipeline)
+            fitted_full_pipeline.fit(X, y)
+            joblib.dump(fitted_full_pipeline, paths["artifact"])
+
+            print(f"Saved model artifacts: {paths['metrics']}, {paths['predictions']}, {paths['artifact']}")
         except Exception as exc:  # pragma: no cover - runtime environment dependent
             failure_reason = f"{type(exc).__name__}: {exc}"
-            rows.append(
-                make_failure_row(
-                    feature_set=args.feature_set,
-                    model_name=model_name,
-                    model_label=model_label,
-                    model_family=model_family,
-                    failure_reason=failure_reason,
-                    n_train=len(X_train),
-                    n_test=len(X_test),
-                )
-            )
-            print(f"Model failed during training: {model_label} -> {failure_reason}")
+            paths["error"].write_text(failure_reason, encoding="utf-8")
+            print(f"Model failed during training: {model_name} -> {failure_reason}")
 
-    leaderboard = pd.DataFrame(rows)[LEADERBOARD_COLUMNS]
-    successful_ensembles = leaderboard.loc[
-        (leaderboard["status"] == "success") & (leaderboard["model_family"] == "ensemble")
-    ].sort_values("cv_rmse_mean")
-
-    selected_model_name = None
-    selected_model_family = None
-    if not successful_ensembles.empty:
-        selected_model_name = str(successful_ensembles.iloc[0]["model"])
-        selected_model_family = str(successful_ensembles.iloc[0]["model_family"])
-        leaderboard.loc[leaderboard["model"] == selected_model_name, "selected_as_best_model_artifact"] = True
-
-        fitted_full_pipeline = clone(registry[selected_model_name]["pipeline"])
-        fitted_full_pipeline.fit(X, y)
-        joblib.dump(fitted_full_pipeline, run_dir / "best_model.joblib")
-        holdout_predictions[selected_model_name].to_csv(
-            run_dir / "best_model_holdout_predictions.csv",
-            index=False,
-            encoding="utf-8-sig",
-        )
-    else:
-        print("No successful ensemble model is available for best_model.joblib.")
-
-    sort_rank = {"success": 0, "failed": 1}
-    leaderboard["_sort_status"] = leaderboard["status"].map(sort_rank).fillna(9)
-    leaderboard = leaderboard.sort_values(["_sort_status", "cv_rmse_mean", "model_family", "model"]).drop(columns=["_sort_status"])
-    leaderboard.to_csv(run_dir / "leaderboard.csv", index=False, encoding="utf-8-sig")
-
-    pd.DataFrame({"feature": X.columns.tolist()}).to_csv(run_dir / "feature_columns.csv", index=False, encoding="utf-8-sig")
-
-    metadata_payload = {
-        "feature_set": args.feature_set,
-        "target_column": "H_v2",
-        "selected_model_name": selected_model_name,
-        "selected_model_family": selected_model_family,
-        "dropped_banned_columns": banned_columns,
-        "random_state": RANDOM_STATE,
-        "train_test_split": "80/20",
-        "cv_strategy": f"{args.n_splits}-fold on training split only",
-        "n_rows_after_target_filter": int(len(X)),
-        "n_features": int(X.shape[1]),
-        "sklearn_version": sklearn.__version__,
-        "package_versions": package_versions,
-        "package_import_errors": package_import_errors,
-        "model_statuses": leaderboard[["model", "model_family", "status", "failure_reason"]].to_dict(orient="records"),
-    }
-    (run_dir / "training_metadata.json").write_text(json.dumps(metadata_payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    update_aggregate_outputs(args.output_dir)
-
-    if selected_model_name is None:
-        raise RuntimeError(
-            "中文：没有任何主集成模型训练成功，因此不会让 baseline 替代主模型池。 "
-            "English: No main ensemble model trained successfully, so baselines are not allowed to replace the main model pool. "
-            f"See {args.output_dir / 'reports' / 'hv2_regression_report.md'} for failure reasons."
+        finalize_feature_set_outputs(
+            output_dir=args.output_dir,
+            feature_set=args.feature_set,
+            model_results_dir=model_results_dir,
+            banned_columns=banned_columns,
+            n_train=len(X_train),
+            n_test=len(X_test),
+            args=args,
+            package_versions=package_versions,
+            package_import_errors=package_import_errors,
+            n_rows_after_target_filter=len(X),
+            n_features=X.shape[1],
         )
 
-    print(leaderboard.to_string(index=False))
-    print(f"Selected best ensemble model artifact: {selected_model_name}")
+    leaderboard = finalize_feature_set_outputs(
+        output_dir=args.output_dir,
+        feature_set=args.feature_set,
+        model_results_dir=model_results_dir,
+        banned_columns=banned_columns,
+        n_train=len(X_train),
+        n_test=len(X_test),
+        args=args,
+        package_versions=package_versions,
+        package_import_errors=package_import_errors,
+        n_rows_after_target_filter=len(X),
+        n_features=X.shape[1],
+    )
+
+    print(leaderboard.to_string(index=False) if not leaderboard.empty else "No saved model results yet.")
     print(f"scikit-learn version: {sklearn.__version__}")
     print(f"xgboost version: {package_versions.get('xgboost')}")
     print(f"lightgbm version: {package_versions.get('lightgbm')}")
     print(f"Wrote {run_dir / 'leaderboard.csv'}")
-    print(f"Wrote {run_dir / 'best_model.joblib'}")
-    print(f"Wrote {run_dir / 'best_model_holdout_predictions.csv'}")
     print(f"Wrote {args.output_dir / 'tables' / 'hv2_model_comparison.csv'}")
     print(f"Wrote {args.output_dir / 'reports' / 'hv2_regression_report.md'}")
     return 0
