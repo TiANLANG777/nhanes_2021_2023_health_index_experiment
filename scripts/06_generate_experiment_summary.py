@@ -86,10 +86,13 @@ def main() -> int:
             lines.append(f"- `{feature_set}` leaderboard not found.")
             continue
         training_found = True
-        selected = leaderboard.loc[leaderboard.get("selected_as_best_model_artifact", False) == True]  # noqa: E712
+        if "selected_as_best_model_artifact" in leaderboard.columns:
+            selected = leaderboard.loc[leaderboard["selected_as_best_model_artifact"] == True]  # noqa: E712
+        else:
+            selected = pd.DataFrame()
         best_row = selected.iloc[0] if not selected.empty else leaderboard.iloc[0]
         lines.append(
-            f"- `{feature_set}` selected ensemble artifact: `{best_row['model_label']}` with CV RMSE {best_row['cv_rmse_mean']:.4f}, "
+            f"- `{feature_set}` selected ensemble artifact: `{best_row.get('model_label', best_row['model'])}` with CV RMSE {best_row['cv_rmse_mean']:.4f}, "
             f"holdout RMSE {best_row['holdout_rmse']:.4f}, holdout R2 {best_row['holdout_r2']:.4f}."
         )
     if not training_found:
