@@ -535,7 +535,7 @@ def update_aggregate_outputs(output_dir: Path) -> None:
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def finalize_feature_set_outputs(output_dir: Path, feature_set: str, model_results_dir: Path, banned_columns: list[str], n_train: int, n_test: int, args: argparse.Namespace, package_versions: dict[str, str | None], package_import_errors: dict[str, str | None], n_rows_after_target_filter: int, n_features: int) -> pd.DataFrame:
+def finalize_feature_set_outputs(output_dir: Path, feature_set: str, model_results_dir: Path, banned_columns: list[str], n_train: int, n_test: int, args: argparse.Namespace, package_versions: dict[str, str | None], package_import_errors: dict[str, str | None], n_rows_after_target_filter: int, feature_names: list[str]) -> pd.DataFrame:
     """Rebuild the leaderboard and selected best artifact. / 重建排行榜与最佳模型产物。"""
     run_dir = output_dir / "hv2_training" / feature_set
     leaderboard = load_saved_rows(feature_set, model_results_dir, n_train=n_train, n_test=n_test)
@@ -572,7 +572,7 @@ def finalize_feature_set_outputs(output_dir: Path, feature_set: str, model_resul
         "requested_model_mode": args.model,
         "force_rerun": bool(args.force),
         "n_rows_after_target_filter": int(n_rows_after_target_filter),
-        "n_features": int(n_features),
+        "n_features": int(len(feature_names)),
         "sklearn_version": sklearn.__version__,
         "package_versions": package_versions,
         "package_import_errors": package_import_errors,
@@ -580,7 +580,7 @@ def finalize_feature_set_outputs(output_dir: Path, feature_set: str, model_resul
     }
     (run_dir / "training_metadata.json").write_text(json.dumps(metadata_payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    pd.DataFrame({"feature": range(n_features)}).to_csv(run_dir / "feature_columns.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame({"feature": feature_names}).to_csv(run_dir / "feature_columns.csv", index=False, encoding="utf-8-sig")
     update_aggregate_outputs(output_dir)
     return leaderboard
 
@@ -604,8 +604,8 @@ def main() -> int:
         random_state=RANDOM_STATE,
     )
 
-    feature_columns = pd.DataFrame({"feature": X.columns.tolist()})
-    feature_columns.to_csv(run_dir / "feature_columns.csv", index=False, encoding="utf-8-sig")
+    feature_names = X.columns.tolist()
+    pd.DataFrame({"feature": feature_names}).to_csv(run_dir / "feature_columns.csv", index=False, encoding="utf-8-sig")
 
     registry, import_failures, package_versions = build_model_registry()
     package_import_errors = {
@@ -651,7 +651,7 @@ def main() -> int:
                 package_versions=package_versions,
                 package_import_errors=package_import_errors,
                 n_rows_after_target_filter=len(X),
-                n_features=X.shape[1],
+                feature_names=feature_names,
             )
             continue
 
@@ -712,7 +712,7 @@ def main() -> int:
             package_versions=package_versions,
             package_import_errors=package_import_errors,
             n_rows_after_target_filter=len(X),
-            n_features=X.shape[1],
+            feature_names=feature_names,
         )
 
     leaderboard = finalize_feature_set_outputs(
@@ -726,7 +726,7 @@ def main() -> int:
         package_versions=package_versions,
         package_import_errors=package_import_errors,
         n_rows_after_target_filter=len(X),
-        n_features=X.shape[1],
+        feature_names=feature_names,
     )
 
     print(leaderboard.to_string(index=False) if not leaderboard.empty else "No saved model results yet.")
