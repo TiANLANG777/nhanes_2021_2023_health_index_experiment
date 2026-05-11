@@ -49,6 +49,20 @@ def main() -> int:
         "",
     ]
 
+    training_versions: dict[str, str] = {}
+    for feature_set in ["full", "reduced"]:
+        metadata = read_json_if_exists(args.output_dir / "hv2_training" / feature_set / "training_metadata.json")
+        if metadata is not None and metadata.get("sklearn_version"):
+            training_versions[feature_set] = str(metadata["sklearn_version"])
+
+    lines.extend(["## Runtime Versions", ""])
+    if training_versions:
+        for feature_set, version in training_versions.items():
+            lines.append(f"- `{feature_set}` training metadata recorded `scikit-learn=={version}`.")
+    else:
+        lines.append("- No recorded `scikit-learn` runtime version was found yet.")
+    lines.append("")
+
     data_check_json = read_json_if_exists(args.output_dir / "data_check" / "data_check_summary.json")
     if data_check_json is None:
         lines.extend(["## Data Check", "", "- Data check artifacts were not found yet.", "- 尚未发现数据检查产物。", ""])
